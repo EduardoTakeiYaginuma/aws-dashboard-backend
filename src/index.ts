@@ -5,6 +5,8 @@ import { healthRoutes } from './routes/health';
 import { workspaceRoutes } from './routes/workspaces';
 import { recommendationRoutes } from './routes/recommendations';
 import { jobRoutes } from './routes/jobs';
+import { inventoryRoutes } from './routes/inventory';
+import { costsRoutes } from './routes/costs';
 import { startScheduler } from './jobs/scheduler';
 
 async function main(): Promise<void> {
@@ -22,6 +24,8 @@ async function main(): Promise<void> {
   await app.register(workspaceRoutes);
   await app.register(recommendationRoutes);
   await app.register(jobRoutes);
+  await app.register(inventoryRoutes);
+  await app.register(costsRoutes);
 
   const port = parseInt(process.env.PORT || '4000', 10);
   const host = '0.0.0.0';

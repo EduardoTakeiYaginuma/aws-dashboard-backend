@@ -36,7 +36,7 @@ async function processWorkspace(workspaceId: string): Promise<void> {
       awsAccountId: workspace.awsAccountId,
     });
 
-    const recommendations = await runFinOpsEngine(clients);
+    const recommendations = await runFinOpsEngine(clients, workspace.id);
 
     let upsertCount = 0;
     for (const rec of recommendations) {

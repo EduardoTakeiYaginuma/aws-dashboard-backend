@@ -1,3 +1,5 @@
+import prisma from '../db';
+import { Prisma } from '@prisma/client';
 import {
   AwsClients,
   EC2Instance,
@@ -63,6 +65,78 @@ const RDS_HOURLY_PRICES: Record<string, number> = {
   'db.r5.xlarge': 0.48,
   'db.r5.2xlarge': 0.96,
 };
+
+// ── Cost Calculation Helpers ──
+
+function getEc2InstanceCost(instance: EC2Instance): number {
+  if (instance.state !== 'running') {
+    return 0;
+  }
+  const hourlyPrice = EC2_HOURLY_PRICES[instance.instanceType] ?? 0;
+  return hourlyPrice * HOURS_IN_MONTH;
+}
+
+function getEbsVolumeCost(volume: EBSVolume): number {
+  const pricePerGiB = EBS_MONTHLY_PER_GIB[volume.volumeType] ?? 0.1;
+  return volume.size * pricePerGiB;
+}
+
+function getS3BucketCost(bucket: S3BucketInfo): number {
+  const sizeGB = bucket.sizeBytes / (1024 * 1024 * 1024);
+  return sizeGB * S3_STANDARD_PER_GB;
+}
+
+function getRdsInstanceCost(instance: RDSInstance): number {
+  if (instance.status !== 'available') {
+    return 0;
+  }
+  const hourlyPrice = RDS_HOURLY_PRICES[instance.dbInstanceClass] ?? 0;
+  return hourlyPrice * HOURS_IN_MONTH;
+}
+
+/**
+ * Persist resource information to the database.
+ */
+async function upsertResources(
+  workspaceId: string,
+  resources: Prisma.ResourceCreateInput[]
+): Promise<void> {
+  const now = new Date();
+  await prisma.$transaction(
+    resources.map((resource) =>
+      prisma.resource.upsert({
+        where: {
+          workspaceId_resourceId: {
+            workspaceId,
+            resourceId: resource.resourceId,
+          },
+        },
+        create: {
+          workspaceId,
+          resourceId: resource.resourceId,
+          service: resource.service,
+          type: resource.type,
+          name: resource.name,
+          tags: resource.tags,
+          state: resource.state,
+          estimatedMonthlyCost: resource.estimatedMonthlyCost,
+          lastSeenAt: now
+        },
+        update: {
+          service: resource.service,
+          type: resource.type,
+          name: resource.name,
+          tags: resource.tags,
+          state: resource.state,
+          estimatedMonthlyCost: resource.estimatedMonthlyCost,
+          lastSeenAt: now
+        },
+      })
+    )
+  );
+  console.log(`[engine] Upserted ${resources.length} resources for workspace ${workspaceId}`);
+}
+
 
 /**
  * Heuristic 1: EC2 Downsizing
@@ -268,7 +342,8 @@ export function analyzeRDSDownsizing(
  * a combined list of recommendations.
  */
 export async function runFinOpsEngine(
-  clients: AwsClients
+  clients: AwsClients,
+  workspaceId: string
 ): Promise<RecommendationInput[]> {
   const [ec2Instances, ebsVolumes, s3Buckets, rdsInstances] = await Promise.all([
     clients.listEC2Instances(),
@@ -279,6 +354,55 @@ export async function runFinOpsEngine(
 
   const instanceIds = ec2Instances.map((i) => i.instanceId);
   const cpuMetrics = await clients.getEC2CpuMetrics(instanceIds);
+
+  const resourcesToUpsert: Prisma.ResourceCreateInput[] = [
+    ...ec2Instances.map(
+      (r) =>
+        ({
+          resourceId: r.instanceId,
+          service: 'EC2',
+          type: r.instanceType,
+          name: r.tags['Name'] ?? null,
+          tags: r.tags,
+          state: r.state,
+          estimatedMonthlyCost: getEc2InstanceCost(r),
+        } as Prisma.ResourceCreateInput)
+    ),
+    ...ebsVolumes.map(
+      (r) =>
+        ({
+          resourceId: r.volumeId,
+          service: 'EBS',
+          type: r.volumeType,
+          state: r.state,
+          estimatedMonthlyCost: getEbsVolumeCost(r),
+        } as Prisma.ResourceCreateInput)
+    ),
+    ...s3Buckets.map(
+      (r) =>
+        ({
+          resourceId: r.bucketName,
+          service: 'S3',
+          type: 'bucket',
+          name: r.bucketName,
+          state: 'available',
+          estimatedMonthlyCost: getS3BucketCost(r),
+        } as Prisma.ResourceCreateInput)
+    ),
+    ...rdsInstances.map(
+      (r) =>
+        ({
+          resourceId: r.dbInstanceId,
+          service: 'RDS',
+          type: r.dbInstanceClass,
+          name: r.dbInstanceId,
+          state: r.status,
+          estimatedMonthlyCost: getRdsInstanceCost(r),
+        } as Prisma.ResourceCreateInput)
+    ),
+  ];
+
+  await upsertResources(workspaceId, resourcesToUpsert);
 
   const recommendations: RecommendationInput[] = [
     ...analyzeEC2Downsizing(ec2Instances, cpuMetrics),
