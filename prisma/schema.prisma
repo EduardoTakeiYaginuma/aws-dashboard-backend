@@ -79,6 +79,7 @@ model Resource {
   type                 String?  // ex: t3.micro, volume, bucket
   name                 String?  // se disponível (tag Name)
   tags                 Json?    // JSONB com tags
+  metadata             Json?    // JSONB com detalhes extras (IPs, configs, etc)
   state                String?  // ex: running, stopped
   lastSeenAt           DateTime @default(now())
   estimatedMonthlyCost Float?   // USD
