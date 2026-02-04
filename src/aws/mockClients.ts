@@ -6,6 +6,10 @@ import {
   S3BucketInfo,
   RDSInstance,
   CostData,
+  LambdaFunction,
+  LoadBalancerInfo,
+  NatGatewayInfo,
+  ElasticIPInfo,
 } from './types';
 
 /**
@@ -178,6 +182,133 @@ export function createMockAwsClients(_workspaceId: string): AwsClients {
     },
   ];
 
+  const lambdaFunctions: LambdaFunction[] = [
+    {
+      functionName: 'api-gateway-handler',
+      runtime: 'nodejs18.x',
+      memoryMB: 256,
+      timeoutSeconds: 30,
+      codeSize: 5_242_880,
+      lastModified: '2024-07-15T10:00:00Z',
+      avgInvocationsPerDay: 12_500,
+      avgDurationMs: 45,
+    },
+    {
+      functionName: 'legacy-image-resizer',
+      runtime: 'python3.9',
+      memoryMB: 1024,
+      timeoutSeconds: 300,
+      codeSize: 15_728_640,
+      lastModified: '2023-11-01T08:00:00Z',
+      avgInvocationsPerDay: 0, // zero invocations — candidate
+      avgDurationMs: 0,
+    },
+    {
+      functionName: 'old-etl-processor',
+      runtime: 'python3.8',
+      memoryMB: 2048,
+      timeoutSeconds: 900,
+      codeSize: 52_428_800,
+      lastModified: '2023-06-20T12:00:00Z',
+      avgInvocationsPerDay: 0, // zero invocations — candidate
+      avgDurationMs: 0,
+    },
+    {
+      functionName: 'notification-sender',
+      runtime: 'nodejs18.x',
+      memoryMB: 512,
+      timeoutSeconds: 60,
+      codeSize: 2_097_152,
+      lastModified: '2024-08-01T14:00:00Z',
+      avgInvocationsPerDay: 3_200,
+      avgDurationMs: 12,  // very low duration vs 512MB — oversized memory
+    },
+    {
+      functionName: 'data-aggregator',
+      runtime: 'nodejs20.x',
+      memoryMB: 128,
+      timeoutSeconds: 15,
+      codeSize: 1_048_576,
+      lastModified: '2024-09-10T09:00:00Z',
+      avgInvocationsPerDay: 8_000,
+      avgDurationMs: 85,
+    },
+  ];
+
+  const loadBalancers: LoadBalancerInfo[] = [
+    {
+      loadBalancerArn: 'arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/prod-alb/50dc6c495c0c9188',
+      loadBalancerName: 'prod-alb',
+      type: 'application',
+      state: 'active',
+      createdAt: new Date('2024-03-01'),
+      activeTargetCount: 4,
+      totalTargetCount: 4,
+      requestCountPerDay: 250_000,
+    },
+    {
+      loadBalancerArn: 'arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/staging-alb/60dc6c495c0c9199',
+      loadBalancerName: 'staging-alb',
+      type: 'application',
+      state: 'active',
+      createdAt: new Date('2024-04-15'),
+      activeTargetCount: 0, // no healthy targets — candidate
+      totalTargetCount: 0,
+      requestCountPerDay: 0,
+    },
+    {
+      loadBalancerArn: 'arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/net/internal-nlb/70dc6c495c0c9200',
+      loadBalancerName: 'internal-nlb',
+      type: 'network',
+      state: 'active',
+      createdAt: new Date('2024-01-10'),
+      activeTargetCount: 2,
+      totalTargetCount: 2,
+      requestCountPerDay: 0, // zero requests — candidate
+    },
+  ];
+
+  const natGateways: NatGatewayInfo[] = [
+    {
+      natGatewayId: 'nat-0a1b2c3d4e5f00001',
+      state: 'available',
+      subnetId: 'subnet-abc123',
+      vpcId: 'vpc-main001',
+      createdAt: new Date('2024-02-01'),
+      bytesProcessedPerDay: 85_000_000_000, // ~85 GB/day — active
+    },
+    {
+      natGatewayId: 'nat-0a1b2c3d4e5f00002',
+      state: 'available',
+      subnetId: 'subnet-def456',
+      vpcId: 'vpc-dev001',
+      createdAt: new Date('2024-05-01'),
+      bytesProcessedPerDay: 50_000_000, // ~50 MB/day — idle candidate
+    },
+  ];
+
+  const elasticIPs: ElasticIPInfo[] = [
+    {
+      allocationId: 'eipalloc-0a1b2c3d4e5f00001',
+      publicIp: '54.123.45.67',
+      associationId: 'eipassoc-abc123',
+      instanceId: 'i-0a1b2c3d4e5f00001',
+      domain: 'vpc',
+    },
+    {
+      allocationId: 'eipalloc-0a1b2c3d4e5f00002',
+      publicIp: '54.123.45.68',
+      domain: 'vpc',
+      // not associated — candidate
+    },
+    {
+      allocationId: 'eipalloc-0a1b2c3d4e5f00003',
+      publicIp: '54.123.45.69',
+      domain: 'vpc',
+      // not associated — candidate
+    },
+  ];
+
   const costData: CostData = {
     totalMonthly: 12_450.0 + rand() * 500,
     byService: {
@@ -211,6 +342,22 @@ export function createMockAwsClients(_workspaceId: string): AwsClients {
 
     async listRDSInstances(): Promise<RDSInstance[]> {
       return rdsInstances;
+    },
+
+    async listLambdaFunctions(): Promise<LambdaFunction[]> {
+      return lambdaFunctions;
+    },
+
+    async listLoadBalancers(): Promise<LoadBalancerInfo[]> {
+      return loadBalancers;
+    },
+
+    async listNatGateways(): Promise<NatGatewayInfo[]> {
+      return natGateways;
+    },
+
+    async listElasticIPs(): Promise<ElasticIPInfo[]> {
+      return elasticIPs;
     },
 
     async getCostData(): Promise<CostData> {

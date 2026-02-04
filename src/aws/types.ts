@@ -49,12 +49,55 @@ export interface CostData {
   currency: string;
 }
 
+export interface LambdaFunction {
+  functionName: string;
+  runtime: string;
+  memoryMB: number;
+  timeoutSeconds: number;
+  codeSize: number;
+  lastModified: string;
+  avgInvocationsPerDay: number;
+  avgDurationMs: number;
+}
+
+export interface LoadBalancerInfo {
+  loadBalancerArn: string;
+  loadBalancerName: string;
+  type: string;
+  state: string;
+  createdAt: Date;
+  activeTargetCount: number;
+  totalTargetCount: number;
+  requestCountPerDay: number;
+}
+
+export interface NatGatewayInfo {
+  natGatewayId: string;
+  state: string;
+  subnetId: string;
+  vpcId: string;
+  createdAt: Date;
+  bytesProcessedPerDay: number;
+}
+
+export interface ElasticIPInfo {
+  allocationId: string;
+  publicIp: string;
+  associationId?: string;
+  instanceId?: string;
+  domain: string;
+}
+
 export interface AwsClients {
   listEC2Instances(): Promise<EC2Instance[]>;
   getEC2CpuMetrics(instanceIds: string[]): Promise<CloudWatchMetric[]>;
   listEBSVolumes(): Promise<EBSVolume[]>;
   listS3Buckets(): Promise<S3BucketInfo[]>;
   listRDSInstances(): Promise<RDSInstance[]>;
+  listLambdaFunctions(): Promise<LambdaFunction[]>;
+  listLoadBalancers(): Promise<LoadBalancerInfo[]>;
+  listNatGateways(): Promise<NatGatewayInfo[]>;
+  listElasticIPs(): Promise<ElasticIPInfo[]>;
   getCostData(): Promise<CostData>;
   testConnection(): Promise<boolean>;
 }
