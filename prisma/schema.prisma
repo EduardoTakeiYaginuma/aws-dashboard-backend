@@ -91,3 +91,17 @@ model Resource {
   @@index([service])
   @@unique([workspaceId, resourceId])
 }
+
+model Analytics {
+  id        String   @id @default(uuid())
+  visitorId String
+  event     String   // page_view | click_free_test | view_instructions | click_connect | connect_success | connect_error
+  metadata  Json?
+  userAgent String?
+  referrer  String?
+  createdAt DateTime @default(now())
+
+  @@index([event])
+  @@index([visitorId])
+  @@index([createdAt])
+}
