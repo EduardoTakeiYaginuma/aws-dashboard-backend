@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import prisma from '../db';
 import { getAwsClients } from '../aws';
 import { runFinOpsEngine } from '../engine/finopsEngine';
+import { syncWorkspaceResources } from '../services/resourceSync';
 
 let isRunning = false;
 
@@ -30,13 +31,24 @@ async function processWorkspace(workspaceId: string): Promise<void> {
   );
 
   try {
+    // Sync all resources into the Resource table
+    try {
+      const syncResult = await syncWorkspaceResources(workspace.id);
+      console.log(`[scheduler] Resource sync: ${syncResult.total} resources synced`);
+      if (syncResult.errors.length > 0) {
+        console.warn(`[scheduler] Resource sync warnings:`, syncResult.errors);
+      }
+    } catch (syncErr) {
+      console.warn(`[scheduler] Resource sync failed (continuing with recommendations):`, syncErr);
+    }
+
     const clients = getAwsClients({
       workspaceId: workspace.id,
       roleArn: workspace.roleArn,
       awsAccountId: workspace.awsAccountId,
     });
 
-    const recommendations = await runFinOpsEngine(clients);
+    const recommendations = await runFinOpsEngine(clients, workspace.id);
 
     let upsertCount = 0;
     for (const rec of recommendations) {

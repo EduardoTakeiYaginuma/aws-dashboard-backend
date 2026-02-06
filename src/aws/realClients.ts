@@ -3,6 +3,8 @@ import {
   EC2Client,
   DescribeInstancesCommand,
   DescribeVolumesCommand,
+  DescribeNatGatewaysCommand,
+  DescribeAddressesCommand,
 } from '@aws-sdk/client-ec2';
 import {
   CloudWatchClient,
@@ -19,6 +21,13 @@ import {
   CostExplorerClient,
   GetCostAndUsageCommand,
 } from '@aws-sdk/client-cost-explorer';
+import { LambdaClient, ListFunctionsCommand } from '@aws-sdk/client-lambda';
+import {
+  ElasticLoadBalancingV2Client,
+  DescribeLoadBalancersCommand,
+  DescribeTargetGroupsCommand,
+  DescribeTargetHealthCommand,
+} from '@aws-sdk/client-elastic-load-balancing-v2';
 import type { Credentials } from '@aws-sdk/types';
 import {
   AwsClients,
@@ -28,6 +37,10 @@ import {
   S3BucketInfo,
   RDSInstance,
   CostData,
+  LambdaFunction,
+  LoadBalancerInfo,
+  NatGatewayInfo,
+  ElasticIPInfo,
 } from './types';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'us-east-1';
@@ -93,6 +106,16 @@ export function createRealAwsClients(
   async function getCostExplorerClient(): Promise<CostExplorerClient> {
     const creds = await getCredentials();
     return new CostExplorerClient({ region: DEFAULT_REGION, credentials: creds });
+  }
+
+  async function getLambdaClient(): Promise<LambdaClient> {
+    const creds = await getCredentials();
+    return new LambdaClient({ region: DEFAULT_REGION, credentials: creds });
+  }
+
+  async function getELBv2Client(): Promise<ElasticLoadBalancingV2Client> {
+    const creds = await getCredentials();
+    return new ElasticLoadBalancingV2Client({ region: DEFAULT_REGION, credentials: creds });
   }
 
   return {
@@ -401,6 +424,279 @@ export function createRealAwsClients(
       } while (marker);
 
       return instances;
+    },
+
+    async listLambdaFunctions(): Promise<LambdaFunction[]> {
+      const lambda = await getLambdaClient();
+      const cw = await getCloudWatchClient();
+      const functions: LambdaFunction[] = [];
+      let marker: string | undefined;
+
+      do {
+        const res = await lambda.send(new ListFunctionsCommand({ Marker: marker }));
+        for (const fn of res.Functions || []) {
+          if (!fn.FunctionName) continue;
+
+          let avgInvocationsPerDay = 0;
+          let avgDurationMs = 0;
+
+          try {
+            const now = new Date();
+            const startTime = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+
+            const metricsRes = await cw.send(
+              new GetMetricDataCommand({
+                StartTime: startTime,
+                EndTime: now,
+                MetricDataQueries: [
+                  {
+                    Id: 'invocations',
+                    MetricStat: {
+                      Metric: {
+                        Namespace: 'AWS/Lambda',
+                        MetricName: 'Invocations',
+                        Dimensions: [{ Name: 'FunctionName', Value: fn.FunctionName }],
+                      },
+                      Period: 86400, // 1 day
+                      Stat: 'Sum',
+                    },
+                  },
+                  {
+                    Id: 'duration',
+                    MetricStat: {
+                      Metric: {
+                        Namespace: 'AWS/Lambda',
+                        MetricName: 'Duration',
+                        Dimensions: [{ Name: 'FunctionName', Value: fn.FunctionName }],
+                      },
+                      Period: 14 * 24 * 3600,
+                      Stat: 'Average',
+                    },
+                  },
+                ],
+              })
+            );
+
+            const invResult = metricsRes.MetricDataResults?.find((r) => r.Id === 'invocations');
+            const durResult = metricsRes.MetricDataResults?.find((r) => r.Id === 'duration');
+
+            const invValues = invResult?.Values || [];
+            avgInvocationsPerDay = invValues.length > 0
+              ? invValues.reduce((a, b) => a + b, 0) / invValues.length
+              : 0;
+
+            const durValues = durResult?.Values || [];
+            avgDurationMs = durValues.length > 0
+              ? durValues.reduce((a, b) => a + b, 0) / durValues.length
+              : 0;
+          } catch {
+            // If metrics unavailable, leave at 0
+          }
+
+          functions.push({
+            functionName: fn.FunctionName,
+            runtime: fn.Runtime || 'unknown',
+            memoryMB: fn.MemorySize || 128,
+            timeoutSeconds: fn.Timeout || 3,
+            codeSize: fn.CodeSize || 0,
+            lastModified: fn.LastModified || '',
+            avgInvocationsPerDay: Math.round(avgInvocationsPerDay * 100) / 100,
+            avgDurationMs: Math.round(avgDurationMs * 100) / 100,
+          });
+        }
+        marker = res.NextMarker;
+      } while (marker);
+
+      return functions;
+    },
+
+    async listLoadBalancers(): Promise<LoadBalancerInfo[]> {
+      const elb = await getELBv2Client();
+      const cw = await getCloudWatchClient();
+      const loadBalancers: LoadBalancerInfo[] = [];
+
+      let marker: string | undefined;
+      do {
+        const res = await elb.send(new DescribeLoadBalancersCommand({ Marker: marker }));
+        for (const lb of res.LoadBalancers || []) {
+          if (!lb.LoadBalancerArn) continue;
+
+          // Count targets across all associated target groups
+          let activeTargetCount = 0;
+          let totalTargetCount = 0;
+
+          try {
+            const tgRes = await elb.send(
+              new DescribeTargetGroupsCommand({ LoadBalancerArn: lb.LoadBalancerArn })
+            );
+            for (const tg of tgRes.TargetGroups || []) {
+              if (!tg.TargetGroupArn) continue;
+              const healthRes = await elb.send(
+                new DescribeTargetHealthCommand({ TargetGroupArn: tg.TargetGroupArn })
+              );
+              for (const desc of healthRes.TargetHealthDescriptions || []) {
+                totalTargetCount++;
+                if (desc.TargetHealth?.State === 'healthy') {
+                  activeTargetCount++;
+                }
+              }
+            }
+          } catch {
+            // Skip if permissions issue
+          }
+
+          // Get request count from CloudWatch
+          let requestCountPerDay = 0;
+          try {
+            const now = new Date();
+            const startTime = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+            const lbArnSuffix = lb.LoadBalancerArn.split(':loadbalancer/')[1] || '';
+
+            const metricName = lb.Type === 'network' ? 'ActiveFlowCount' : 'RequestCount';
+            const namespace = 'AWS/ApplicationELB';
+
+            const metricsRes = await cw.send(
+              new GetMetricDataCommand({
+                StartTime: startTime,
+                EndTime: now,
+                MetricDataQueries: [
+                  {
+                    Id: 'requests',
+                    MetricStat: {
+                      Metric: {
+                        Namespace: lb.Type === 'network' ? 'AWS/NetworkELB' : namespace,
+                        MetricName: metricName,
+                        Dimensions: [{ Name: 'LoadBalancer', Value: lbArnSuffix }],
+                      },
+                      Period: 86400,
+                      Stat: 'Sum',
+                    },
+                  },
+                ],
+              })
+            );
+
+            const reqResult = metricsRes.MetricDataResults?.find((r) => r.Id === 'requests');
+            const reqValues = reqResult?.Values || [];
+            requestCountPerDay = reqValues.length > 0
+              ? reqValues.reduce((a, b) => a + b, 0) / reqValues.length
+              : 0;
+          } catch {
+            // If metrics unavailable, leave at 0
+          }
+
+          loadBalancers.push({
+            loadBalancerArn: lb.LoadBalancerArn,
+            loadBalancerName: lb.LoadBalancerName || 'unnamed',
+            type: lb.Type || 'application',
+            state: lb.State?.Code || 'unknown',
+            createdAt: lb.CreatedTime || new Date(),
+            activeTargetCount,
+            totalTargetCount,
+            requestCountPerDay: Math.round(requestCountPerDay),
+          });
+        }
+        marker = res.NextMarker;
+      } while (marker);
+
+      return loadBalancers;
+    },
+
+    async listNatGateways(): Promise<NatGatewayInfo[]> {
+      const ec2 = await getEC2Client();
+      const cw = await getCloudWatchClient();
+      const gateways: NatGatewayInfo[] = [];
+
+      const res = await ec2.send(new DescribeNatGatewaysCommand({}));
+      for (const nat of res.NatGateways || []) {
+        if (!nat.NatGatewayId || nat.State !== 'available') continue;
+
+        let bytesProcessedPerDay = 0;
+        try {
+          const now = new Date();
+          const startTime = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+
+          const metricsRes = await cw.send(
+            new GetMetricDataCommand({
+              StartTime: startTime,
+              EndTime: now,
+              MetricDataQueries: [
+                {
+                  Id: 'bytes_out_dst',
+                  MetricStat: {
+                    Metric: {
+                      Namespace: 'AWS/NATGateway',
+                      MetricName: 'BytesOutToDestination',
+                      Dimensions: [{ Name: 'NatGatewayId', Value: nat.NatGatewayId }],
+                    },
+                    Period: 86400,
+                    Stat: 'Sum',
+                  },
+                },
+                {
+                  Id: 'bytes_out_src',
+                  MetricStat: {
+                    Metric: {
+                      Namespace: 'AWS/NATGateway',
+                      MetricName: 'BytesOutToSource',
+                      Dimensions: [{ Name: 'NatGatewayId', Value: nat.NatGatewayId }],
+                    },
+                    Period: 86400,
+                    Stat: 'Sum',
+                  },
+                },
+              ],
+            })
+          );
+
+          const dstResult = metricsRes.MetricDataResults?.find((r) => r.Id === 'bytes_out_dst');
+          const srcResult = metricsRes.MetricDataResults?.find((r) => r.Id === 'bytes_out_src');
+
+          const dstValues = dstResult?.Values || [];
+          const srcValues = srcResult?.Values || [];
+
+          const avgDst = dstValues.length > 0
+            ? dstValues.reduce((a, b) => a + b, 0) / dstValues.length
+            : 0;
+          const avgSrc = srcValues.length > 0
+            ? srcValues.reduce((a, b) => a + b, 0) / srcValues.length
+            : 0;
+
+          bytesProcessedPerDay = avgDst + avgSrc;
+        } catch {
+          // If metrics unavailable, leave at 0
+        }
+
+        gateways.push({
+          natGatewayId: nat.NatGatewayId,
+          state: nat.State || 'unknown',
+          subnetId: nat.SubnetId || '',
+          vpcId: nat.VpcId || '',
+          createdAt: nat.CreateTime || new Date(),
+          bytesProcessedPerDay: Math.round(bytesProcessedPerDay),
+        });
+      }
+
+      return gateways;
+    },
+
+    async listElasticIPs(): Promise<ElasticIPInfo[]> {
+      const ec2 = await getEC2Client();
+      const res = await ec2.send(new DescribeAddressesCommand({}));
+      const eips: ElasticIPInfo[] = [];
+
+      for (const addr of res.Addresses || []) {
+        if (!addr.AllocationId) continue;
+        eips.push({
+          allocationId: addr.AllocationId,
+          publicIp: addr.PublicIp || '',
+          associationId: addr.AssociationId || undefined,
+          instanceId: addr.InstanceId || undefined,
+          domain: addr.Domain || 'vpc',
+        });
+      }
+
+      return eips;
     },
 
     async getCostData(): Promise<CostData> {

@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import prisma from '../db';
 import { authMiddleware } from '../middleware/auth';
 import { getAwsClients } from '../aws';
+import { syncWorkspaceResources } from '../services/resourceSync';
 
 export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
   // Create workspace
@@ -182,6 +183,43 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
 
       const costData = await clients.getCostData();
       return costData;
+    }
+  );
+
+  // Trigger resource sync for a workspace
+  app.post(
+    '/api/workspaces/:id/sync',
+    { preHandler: authMiddleware },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+
+      const workspace = await prisma.workspace.findFirst({
+        where: { id, userId: request.userId },
+      });
+
+      if (!workspace) {
+        return reply.status(404).send({ error: 'Workspace not found' });
+      }
+
+      try {
+        const result = await syncWorkspaceResources(workspace.id);
+
+        await prisma.workspace.update({
+          where: { id },
+          data: { status: 'connected' },
+        });
+
+        return {
+          status: 'completed',
+          message: `Synced ${result.total} resources`,
+          ...result,
+        };
+      } catch (error) {
+        return reply.status(500).send({
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Sync failed',
+        });
+      }
     }
   );
 

@@ -13,6 +13,7 @@ import {
   RDSInstance,
 } from '../aws/types';
 import { createMockAwsClients } from '../aws/mockClients';
+import prisma from '../db';
 
 describe('FinOps Engine', () => {
   describe('analyzeEC2Downsizing', () => {
@@ -295,10 +296,41 @@ describe('FinOps Engine', () => {
   });
 
   describe('runFinOpsEngine (integration with mock clients)', () => {
+    let testWorkspaceId: string;
+    let testUserId: string;
+
+    beforeAll(async () => {
+        const user = await prisma.user.create({
+            data: {
+                id: 'dev-user-id-finops-test',
+                email: 'test-finops@example.com',
+                name: 'Test User Finops',
+            },
+        });
+        testUserId = user.id;
+
+        const workspace = await prisma.workspace.create({
+            data: {
+                id: 'test-workspace',
+                name: 'Test Workspace for Engine',
+                awsAccountId: '123456789012',
+                roleArn: 'arn:aws:iam::123456789012:role/test-role',
+                userId: testUserId,
+            },
+        });
+        testWorkspaceId = workspace.id;
+    });
+
+    afterAll(async () => {
+        await prisma.resource.deleteMany({ where: { workspaceId: testWorkspaceId } });
+        await prisma.workspace.delete({ where: { id: testWorkspaceId } });
+        await prisma.user.delete({ where: { id: testUserId } });
+    });
+
     it('should return recommendations from all heuristics using mock data', async () => {
       const clients = createMockAwsClients('test-workspace');
 
-      const results = await runFinOpsEngine(clients);
+      const results = await runFinOpsEngine(clients, 'test-workspace');
 
       expect(results.length).toBeGreaterThan(0);
 
@@ -329,10 +361,19 @@ describe('FinOps Engine', () => {
       const clients1 = createMockAwsClients('workspace-a');
       const clients2 = createMockAwsClients('workspace-a');
 
-      const results1 = await runFinOpsEngine(clients1);
-      const results2 = await runFinOpsEngine(clients2);
+      await runFinOpsEngine(clients1, 'test-workspace');
+      const results1 = await prisma.resource.findMany({ where: { workspaceId: 'test-workspace' }, orderBy: { resourceId: 'asc' } });
+      await prisma.resource.deleteMany({ where: { workspaceId: 'test-workspace' } });
+      
+      await runFinOpsEngine(clients2, 'test-workspace');
+      const results2 = await prisma.resource.findMany({ where: { workspaceId: 'test-workspace' }, orderBy: { resourceId: 'asc' } });
 
-      expect(results1).toEqual(results2);
+      const cleanResults = (results: any[]) => results.map(r => {
+        const { id, createdAt, updatedAt, lastSeenAt, ...rest } = r;
+        return rest;
+      });
+
+      expect(cleanResults(results1)).toEqual(cleanResults(results2));
     });
   });
 });

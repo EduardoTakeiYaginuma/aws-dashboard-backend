@@ -31,6 +31,7 @@ model Workspace {
   user            User             @relation(fields: [userId], references: [id])
   recommendations Recommendation[]
   jobRuns         JobRun[]
+  resources       Resource[]
 
   @@index([userId])
 }
@@ -67,4 +68,26 @@ model JobRun {
   workspace Workspace @relation(fields: [workspaceId], references: [id])
 
   @@index([workspaceId])
+}
+
+model Resource {
+  id                   String   @id @default(uuid())
+  workspaceId          String
+  resourceId           String   // ex: i-123abc, vol-...
+  arn                  String?  // opcional
+  service              String   // ex: EC2, S3, RDS, EBS
+  type                 String?  // ex: t3.micro, volume, bucket
+  name                 String?  // se disponível (tag Name)
+  tags                 Json?    // JSONB com tags
+  metadata             Json?    // JSONB com detalhes extras (IPs, configs, etc)
+  state                String?  // ex: running, stopped
+  lastSeenAt           DateTime @default(now())
+  estimatedMonthlyCost Float?   // USD
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  @@index([workspaceId])
+  @@index([service])
+  @@unique([workspaceId, resourceId])
 }
