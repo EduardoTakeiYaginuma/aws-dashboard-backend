@@ -1,10 +1,11 @@
 import { FastifyInstance } from 'fastify';
+import { Prisma } from '@prisma/client';
 import prisma from '../db';
 
 interface TrackEventBody {
   visitorId: string;
   event: string;
-  metadata?: Record<string, unknown>;
+  metadata?: Prisma.InputJsonValue;
   referrer?: string;
 }
 
@@ -24,9 +25,9 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
         data: {
           visitorId,
           event,
-          metadata: metadata || null,
-          userAgent,
-          referrer: referrer || null,
+          metadata: metadata ?? undefined,
+          userAgent: userAgent ?? undefined,
+          referrer: referrer ?? undefined,
         },
       });
 
@@ -74,13 +75,13 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
 
       // Agrupar por dia
       const eventsByDay: Record<string, number> = {};
-      recentEvents.forEach((e) => {
+      for (const e of recentEvents) {
         const day = e.createdAt.toISOString().split('T')[0];
         eventsByDay[day] = (eventsByDay[day] || 0) + 1;
-      });
+      }
 
       // Funil de conversão
-      const funnel = {
+      const funnel: Record<string, number> = {
         page_view: 0,
         click_free_test: 0,
         view_instructions: 0,
@@ -89,21 +90,26 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
         connect_error: 0,
       };
 
-      eventCounts.forEach((e) => {
+      for (const e of eventCounts) {
         if (e.event in funnel) {
-          funnel[e.event as keyof typeof funnel] = e._count.event;
+          funnel[e.event] = e._count.event;
         }
-      });
+      }
+
+      const totalEvents = eventCounts.reduce(
+        (sum: number, e: { _count: { event: number } }) => sum + e._count.event,
+        0
+      );
 
       return {
         summary: {
           uniqueVisitors: uniqueVisitors.length,
-          totalEvents: eventCounts.reduce((sum, e) => sum + e._count.event, 0),
+          totalEvents,
           eventsLast24h,
         },
         funnel,
         eventsByDay,
-        eventCounts: eventCounts.map((e) => ({
+        eventCounts: eventCounts.map((e: { event: string; _count: { event: number } }) => ({
           event: e.event,
           count: e._count.event,
         })),
